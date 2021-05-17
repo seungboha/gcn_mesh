@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
+
 from utils import load_data, accuracy, Logger
 from models import GCN
 
@@ -102,10 +103,12 @@ def test(args, model, subject):
           "accuracy= {:.4f}".format(acc_test.item()))
 
 # Model and optimizer
-model = GCN(nfeat=32,
+model = GCN(nfeat=3,
             nhid=args.hidden,
             nclass=32,
             dropout=args.dropout)
+print("# of parameters: ", sum(p.numel() for p in model.parameters()))
+
 optimizer = optim.Adam(model.parameters(),
                        lr=args.lr, weight_decay=args.weight_decay)
 
