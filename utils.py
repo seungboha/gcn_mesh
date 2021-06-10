@@ -6,6 +6,9 @@ import numpy as np
 import scipy.sparse as sp
 import torch
 
+from collections import Iterable
+
+
 
 def encode_onehot(labels):
     classes = set(labels)
@@ -22,7 +25,6 @@ def load_data(data_path, subject):
     subj_path = os.path.join(mesh_path, subject)
     [v, f] = read_vtk(os.path.join(subj_path, 'lh.white.vtk'))    # Index for vertices starts from 0
     
-    
     features = []
     for name in feat_name:
         for file in glob.glob(os.path.join(subj_path, "lh.{}.txt".format(name))):
@@ -30,8 +32,16 @@ def load_data(data_path, subject):
             features.append(feat)
     features = np.array(features)
     features = np.transpose(features)
+
+    # read eigenvectors
+    spectra_path = os.path.join(data_path, "spectra/lh")
+    f_name = os.path.join(spectra_path, '{}.eig.txt'.format(subject))
+    feat = np.genfromtxt(f_name, dtype=np.float32)
+    features = np.hstack([features, feat])
+    #print("============== num of features ==============",features.shape)
     features = sp.csr_matrix(features)
-    
+
+
     label_path = os.path.join(data_path, "label")
     subj_label_path = os.path.join(label_path, subject)
     labels_orig = np.genfromtxt(os.path.join(subj_label_path, "lh.label.txt"))
@@ -58,7 +68,8 @@ def load_data(data_path, subject):
         (np.ones(unordered_edges.shape[0]), (unordered_edges[:, 0], unordered_edges[:, 1])),    # row, col
         shape=(labels.shape[0], labels.shape[0]),
         dtype=np.float32
-                )
+        )
+    adj.setdiag(1)
 
     # build symmetric adjacency matrix
     adj = adj + adj.T.multiply(adj.T > adj) - adj.multiply(adj.T > adj)
@@ -93,12 +104,6 @@ def normalize(mx):
     return mx
 '''
 
-def accuracy(output, labels):
-    preds = output.max(1)[1].type_as(labels)
-    correct = preds.eq(labels).double()
-    correct = correct.sum()
-    return correct / len(labels)
-
 
 def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     """Convert a scipy sparse matrix to a torch sparse tensor."""
@@ -108,6 +113,55 @@ def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     values = torch.from_numpy(sparse_mx.data)
     shape = torch.Size(sparse_mx.shape)
     return torch.sparse.FloatTensor(indices, values, shape)
+
+
+def accuracy(output, labels):
+    preds = output.max(1)[1].type_as(labels)
+    correct = preds.eq(labels).double()
+    correct = correct.sum()
+    return correct / len(labels)
+
+def dice(args, pred_cls, true_cls):
+    nclass = args.nclass
+    positive = torch.histc(true_cls.cpu().float(), bins=nclass, min=0, max=nclass, out=None)
+    predict = torch.histc(pred_cls.cpu().float(), bins=nclass, min=0, max=nclass, out=None)
+    per_cls_counts = []
+    tpos = []
+    for i in range(nclass):
+        true_positive = ((pred_cls == i) & (true_cls == i)).int().sum().item()
+        tpos.append(true_positive)
+        per_cls_counts.append((positive[i] + predict[i]) / 2)
+    return np.array(tpos) / np.array(per_cls_counts)
+
+class Logger(object):
+    def __init__(self, path):
+        self.path = path
+
+    def __len__(self):
+        try: return len(self.read())
+        except: return 0
+
+    def write(self, values):
+        if not isinstance(values, Iterable):
+            values = [values]
+
+        line = ''
+        if isinstance(values, dict):
+            for key, val in values.items():
+                line += '{} : {}\n'.format(key, val)
+        else:
+            for v in values:
+                if isinstance(v, int):
+                    line += '{:<10}'.format(v)
+                elif isinstance(v, float):
+                    line += '{:<15.6f}'.format(v)
+                elif isinstance(v, str):
+                    line += '{}'.format(v)
+                else:
+                    raise Exception('Not supported type.')
+        with open(self.path, 'a') as f:
+            f.write(line[:-1] + '\n')
+
 
 
 def read_vtk(filename):
@@ -136,32 +190,38 @@ def read_vtk(filename):
     f = np.array(f)
     return v, f
 
-class Logger(object):
-    def __init__(self, path, int_form=':04d', float_form=':.6f'):
-        self.path = path
-        self.int_form = int_form
-        self.float_form = float_form
-        self.width = 0
 
-    def __len__(self):
-        try: return len(self.read())
-        except: return 0
+def write_property(fn, v, f, prop): 
+    fp = open(fn, 'w')
+    len_v = v.shape[0]
+    len_f = f.shape[0]
+    
+    fp.write("# vtk DataFile Version 3.0\nvtk output\nASCII\nDATASET POLYDATA\n")
+    fp.write(f"POINTS {len_v} float\n") 
+    for row in v:
+        fp.write(f"{row[0]} {row[1]} {row[2]}\n")
+    fp.write(f"POLYGONS {len_f} {len_f * 4}\n")
+    for row in f:
+        fp.write(f"3 {row[0]} {row[1]} {row[2]}\n")
+    fp.write(f"POINT_DATA {len_v}\n")
+    fp.write(f"FIELD ScalarData {len(prop)}\n")
+    for key in prop.keys():
+        fp.write(f"{key} 1 {len_v} float\n")
+        val = prop[key]
+        for num in val:
+            fp.write(f"{num}\n") 
+    fp.close()
 
-    def write(self, values):
-        if not isinstance(values, Iterable):
-            values = [values]
-        if self.width == 0:
-            self.width = len(values)
-        assert self.width == len(values), 'Inconsistent number of items.'
-        line = ''
-        for v in values:
-            if isinstance(v, int):
-                line += '{{{}}} '.format(self.int_form).format(v)
-            elif isinstance(v, float):
-                line += '{{{}}} '.format(self.float_form).format(v)
-            elif isinstance(v, str):
-                line += '{} '.format(v)
-            else:
-                raise Exception('Not supported type.')
-        with open(self.path, 'a') as f:
-            f.write(line[:-1] + '\n')
+def write_vtk(fn, v, f):
+    len_v = v.shape[0]
+    len_f = f.shape[0] 
+    
+    fp = open(fn, 'w')
+    fp.write("# vtk DataFile Version 3.0\nvtk output\nASCII\nDATASET POLYDATA\n")
+    fp.write(f"POINTS {len_v} float\n")
+    for row in v:
+        fp.write(f"{row[0]} {row[1]} {row[2]}\n")
+    fp.write(f"POLYGONS {len_f} {len_f * 4}\n")
+    for row in f:
+        fp.write(f"3 {row[0]} {row[1]} {row[2]}\n")
+    fp.close()
